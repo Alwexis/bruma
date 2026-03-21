@@ -10,7 +10,8 @@ de video, de sonido, sprites. En resumen MMU orquesta todo este desparrame de in
 */
 pub struct MMU {
   cartridge: Cartridge, // asignamos la struct Cartridge como type de cartridge
-  ram: Vec<u8> // vector de bytes para la RAM
+  ram: Vec<u8>, // vector de bytes para la RAM
+  vram: Vec<u8>
 }
 
 impl MMU {
@@ -19,6 +20,7 @@ impl MMU {
     MMU {
       cartridge,
       ram: vec![0u8; 0x10000],
+      vram: vec![0u8; 0x2000]
     }
   }
 
@@ -29,6 +31,7 @@ impl MMU {
       0x0000..=0x7FFF => self.cartridge.read(address),
       // entre 0xC000 y 0xDFFF restamos 0xC000 y retornamos el resultado
       0xC000..=0xDFFF => self.ram[(address - 0xC000) as usize],
+      0x8000..=0x9FFF => self.vram[(address - 0x8000) as usize],
       _ => 0xFF,
     }
   }
@@ -44,6 +47,7 @@ impl MMU {
   pub fn write(&mut self, address: u16, value: u8) {
     match address {
       0xC000..=0xDFFF => self.ram[(address - 0xC000) as usize] = value,
+      0x8000..=0x9FFF => self.vram[(address - 0x8000) as usize] = value,
       _ => {}
     }
   }
