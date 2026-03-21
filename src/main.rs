@@ -11,11 +11,14 @@ fn main() {
 
     match cart {
         Ok(c) => {
-            let mmu = MMU::new(c);
-            let cpu = CPU::new();
+            let mut mmu = MMU::new(c);
+            let mut cpu = CPU::new();
             println!("ROM cargada correctamente");
             println!("Título: {:#?}", mmu.title());
             println!("Estado inicial CPU: {:#?}", cpu);
+            cpu.step(&mut mmu);
+            cpu.step(&mut mmu);
+            println!("{:#?}", cpu.pc)
         },
         Err(e) => println!("Error al cargar la ROM: {}", e)
     }

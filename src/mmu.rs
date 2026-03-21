@@ -33,6 +33,13 @@ impl MMU {
     }
   }
 
+  pub fn read_u16(&self, address: u16) -> u16 {
+    let low = self.read(address);
+    let high = self.read(address + 1);
+    let new_address = ((high as u16) << 8) | (low as u16);
+    new_address
+  }
+
   // escribimos bytes a la direccion indicada
   pub fn write(&mut self, address: u16, value: u8) {
     match address {
