@@ -16,9 +16,10 @@ fn main() {
             println!("ROM cargada correctamente");
             println!("Título: {:#?}", mmu.title());
             println!("Estado inicial CPU: {:#?}", cpu);
-            cpu.step(&mut mmu);
-            cpu.step(&mut mmu);
-            println!("{:#?}", cpu.pc)
+            for _ in 0..40 {
+                cpu.step(&mut mmu);
+                println!("PC: {:#06x}", cpu.pc);
+            }
         },
         Err(e) => println!("Error al cargar la ROM: {}", e)
     }
