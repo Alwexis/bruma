@@ -325,7 +325,7 @@ impl CPU {
         self.c = self.c.wrapping_sub(1);
         self.set_flag_z(self.c == 0);
         4
-      },
+    },
       // LD A, [HL]: lee el byte en la direccion que apunta HL y lo guarda en A
       0x7e => {
         let address = (self.h as u16) << 8 | self.l as u16;
@@ -361,6 +361,21 @@ impl CPU {
         mmu.write(self.sp, (self.pc & 0xFF) as u8); // byte bajo
         self.pc = 0x0010;
         16
+      },
+      // LD [HL+], A1: Escribe A en HL y luego incrementa HL
+      0x22 => {
+        let mut value = (self.h as u16) << 8 | self.l as u16;
+        mmu.write(value, self.a);
+        value = value.wrapping_add(1);
+        self.h = (value >> 8) as u8;
+        self.l = (value & 0xFF) as u8;
+        8
+      },
+      // INC A
+      0x3c => {
+        self.a = self.a.wrapping_add(1);
+        self.set_flag_z(self.a == 0);
+        4
       },
       _ => {
         use std::io::Write;
