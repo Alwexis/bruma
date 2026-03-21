@@ -16,7 +16,7 @@ fn main() {
             println!("ROM cargada correctamente");
             println!("Título: {:#?}", mmu.title());
             println!("Estado inicial CPU: {:#?}", cpu);
-            for _ in 0..40 {
+            loop {
                 cpu.step(&mut mmu);
                 println!("PC: {:#06x}", cpu.pc);
             }
