@@ -51,7 +51,7 @@ fn main() {
             Event::MainEventsCleared => {
                 for _ in 0..70224 {
                     let ciclos = cpu.step(&mut mmu);
-                    ppu.step(ciclos, pixels.frame_mut());
+                    ppu.step(ciclos, pixels.frame_mut(), &mut mmu);
                 }
                 pixels.render().unwrap();
             }

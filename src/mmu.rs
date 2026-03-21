@@ -11,7 +11,8 @@ de video, de sonido, sprites. En resumen MMU orquesta todo este desparrame de in
 pub struct MMU {
   cartridge: Cartridge, // asignamos la struct Cartridge como type de cartridge
   ram: Vec<u8>, // vector de bytes para la RAM
-  vram: Vec<u8>
+  vram: Vec<u8>,
+  linea_lcd: u8
 }
 
 impl MMU {
@@ -20,7 +21,8 @@ impl MMU {
     MMU {
       cartridge,
       ram: vec![0u8; 0x10000],
-      vram: vec![0u8; 0x2000]
+      vram: vec![0u8; 0x2000],
+      linea_lcd: 0
     }
   }
 
@@ -32,6 +34,7 @@ impl MMU {
       // entre 0xC000 y 0xDFFF restamos 0xC000 y retornamos el resultado
       0xC000..=0xDFFF => self.ram[(address - 0xC000) as usize],
       0x8000..=0x9FFF => self.vram[(address - 0x8000) as usize],
+      0xFF44 => self.linea_lcd,
       _ => 0xFF,
     }
   }
@@ -47,8 +50,20 @@ impl MMU {
   pub fn write(&mut self, address: u16, value: u8) {
     match address {
       0xC000..=0xDFFF => self.ram[(address - 0xC000) as usize] = value,
-      0x8000..=0x9FFF => self.vram[(address - 0x8000) as usize] = value,
+      0x8000..=0x9FFF => {
+        self.vram[(address - 0x8000) as usize] = value;
+        if value != 0 {
+            println!("VRAM escrita en {:#06x} valor {:#04x}", address, value);
+        }
+      },
       _ => {}
+    }
+  }
+
+  pub fn tick_linea(&mut self) {
+    self.linea_lcd = self.linea_lcd.wrapping_add(1);
+    if self.linea_lcd > 153 {
+        self.linea_lcd = 0;
     }
   }
 
