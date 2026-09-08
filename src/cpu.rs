@@ -13,6 +13,7 @@ pub struct CPU {
     pub pc: u16,
     pub sp: u16,
     ime: bool,
+    halted: bool,
 }
 
 impl CPU {
@@ -29,6 +30,7 @@ impl CPU {
             pc: 0x0100,
             sp: 0xFFFE,
             ime: false,
+            halted: false,
         }
     }
 
@@ -41,6 +43,7 @@ impl CPU {
         } else {
             self.f &= !0b10000000;
         }
+        self.f &= 0xF0;
     }
     fn get_flag_c(&self) -> bool {
         self.f & 0b00010000 != 0
@@ -51,6 +54,7 @@ impl CPU {
         } else {
             self.f &= !0b00010000;
         }
+        self.f &= 0xF0;
     }
     fn set_flag_n(&mut self, v: bool) {
         if v {
@@ -58,6 +62,7 @@ impl CPU {
         } else {
             self.f &= !0b01000000;
         }
+        self.f &= 0xF0;
     }
     fn set_flag_h(&mut self, v: bool) {
         if v {
@@ -65,6 +70,7 @@ impl CPU {
         } else {
             self.f &= !0b00100000;
         }
+        self.f &= 0xF0;
     }
 
     fn hl(&self) -> u16 {
@@ -90,25 +96,33 @@ impl CPU {
     }
 
     pub fn handle_interrupts(&mut self, mmu: &mut MMU) {
-        if !self.ime {
-            return;
-        }
+        if !self.ime { return; }
         let triggered = mmu.ie & mmu.if_;
-        if triggered == 0 {
-            return;
-        }
+        if triggered == 0 { return; }
+    
         self.ime = false;
-        if triggered & 0x04 != 0 {
-            mmu.if_ &= !0x04;
-            self.push(mmu, self.pc);
-            self.pc = 0x0050; // timer interrupt handler
-        }
+        self.halted = false;
+    
         if triggered & 0x01 != 0 {
             mmu.if_ &= !0x01;
-            self.sp = self.sp.wrapping_sub(2);
-            mmu.write(self.sp.wrapping_add(1), (self.pc >> 8) as u8);
-            mmu.write(self.sp, (self.pc & 0xFF) as u8);
+            self.push(mmu, self.pc);
             self.pc = 0x0040;
+        } else if triggered & 0x02 != 0 {
+            mmu.if_ &= !0x02;
+            self.push(mmu, self.pc);
+            self.pc = 0x0048;
+        } else if triggered & 0x04 != 0 {
+            mmu.if_ &= !0x04;
+            self.push(mmu, self.pc);
+            self.pc = 0x0050;
+        } else if triggered & 0x08 != 0 {
+            mmu.if_ &= !0x08;
+            self.push(mmu, self.pc);
+            self.pc = 0x0058;
+        } else if triggered & 0x10 != 0 {
+            mmu.if_ &= !0x10;
+            self.push(mmu, self.pc);
+            self.pc = 0x0060;
         }
     }
 
@@ -125,7 +139,126 @@ impl CPU {
         (hi << 8) | lo
     }
 
+    fn cp_a(&mut self, value: u8) {
+        let a = self.a;
+        let r = a.wrapping_sub(value);
+        self.set_flag_z(r == 0);
+        self.set_flag_n(true);
+        self.set_flag_h((a & 0x0F) < (value & 0x0F));
+        self.set_flag_c(a < value);
+    }
+
+    fn and_a(&mut self, value: u8) {
+        self.a &= value;
+        self.set_flag_z(self.a == 0);
+        self.set_flag_n(false);
+        self.set_flag_h(true);
+        self.set_flag_c(false);
+    }
+
+    fn xor_a(&mut self, value: u8) {
+        self.a ^= value;
+        self.set_flag_z(self.a == 0);
+        self.set_flag_n(false);
+        self.set_flag_h(false);
+        self.set_flag_c(false);
+    }
+
+    fn or_a(&mut self, value: u8) {
+        self.a |= value;
+        self.set_flag_z(self.a == 0);
+        self.set_flag_n(false);
+        self.set_flag_h(false);
+        self.set_flag_c(false);
+    }
+
+    fn inc8(&mut self, value: u8) -> u8 {
+        let r = value.wrapping_add(1);
+        self.set_flag_z(r == 0);
+        self.set_flag_n(false);
+        self.set_flag_h((value & 0x0F) == 0x0F);
+        r
+    }
+
+    fn dec8(&mut self, value: u8) -> u8 {
+        let r = value.wrapping_sub(1);
+        self.set_flag_z(r == 0);
+        self.set_flag_n(true);
+        self.set_flag_h((value & 0x0F) == 0x00);
+        r
+    }
+
+    fn add_hl(&mut self, value: u16) {
+        let hl = self.hl();
+        let r = hl.wrapping_add(value);
+        self.set_flag_n(false);
+        self.set_flag_h(((hl & 0x0FFF) + (value & 0x0FFF)) > 0x0FFF);
+        self.set_flag_c((hl as u32 + value as u32) > 0xFFFF);
+        self.set_hl(r);
+    }
+
+    fn add_a(&mut self, value: u8) {
+        let a = self.a;
+        let r = a.wrapping_add(value);
+        self.a = r;
+        self.set_flag_z(r == 0);
+        self.set_flag_n(false);
+        self.set_flag_h(((a & 0x0F) + (value & 0x0F)) > 0x0F);
+        self.set_flag_c((a as u16 + value as u16) > 0xFF);
+    }
+
+    fn adc_a(&mut self, value: u8) {
+        let carry = if self.get_flag_c() { 1u8 } else { 0 };
+        let a = self.a;
+        let r = a.wrapping_add(value).wrapping_add(carry);
+        self.a = r;
+        self.set_flag_z(r == 0);
+        self.set_flag_n(false);
+        self.set_flag_h(((a & 0x0F) + (value & 0x0F) + carry) > 0x0F);
+        self.set_flag_c((a as u16 + value as u16 + carry as u16) > 0xFF);
+    }
+
+    fn sub_a(&mut self, value: u8) {
+        let a = self.a;
+        let r = a.wrapping_sub(value);
+        self.a = r;
+        self.set_flag_z(r == 0);
+        self.set_flag_n(true);
+        self.set_flag_h((a & 0x0F) < (value & 0x0F));
+        self.set_flag_c(a < value);
+    }
+
+    fn sbc_a(&mut self, value: u8) {
+        let carry = if self.get_flag_c() { 1u8 } else { 0 };
+        let a = self.a;
+        let r = a.wrapping_sub(value).wrapping_sub(carry);
+        self.a = r;
+        self.set_flag_z(r == 0);
+        self.set_flag_n(true);
+        self.set_flag_h((a & 0x0F) < ((value & 0x0F) + carry));
+        self.set_flag_c((a as u16) < (value as u16 + carry as u16));
+    }
+
+    fn add_sp_signed(&mut self, value: i8) {
+        let sp = self.sp;
+        let addend = value as i16 as u16;
+        let result = ((sp as i32) + (value as i32)) as u16;
+        self.set_flag_z(false);
+        self.set_flag_n(false);
+        self.set_flag_h(((sp & 0x0F) + (addend & 0x0F)) > 0x0F);
+        self.set_flag_c(((sp & 0xFF) + (addend & 0xFF)) > 0xFF);
+        self.sp = result;
+    }
+
     pub fn step(&mut self, mmu: &mut MMU) -> u8 {
+        if self.halted {
+            // HALT ends once any interrupt is requested.
+            if (mmu.ie & mmu.if_) != 0 {
+                self.halted = false;
+            }
+            return 4;
+        }
+
         let opcode = mmu.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
 
@@ -146,13 +279,11 @@ impl CPU {
                 8
             } // INC BC
             0x04 => {
-                self.b = self.b.wrapping_add(1);
-                self.set_flag_z(self.b == 0);
+                self.b = self.inc8(self.b);
                 4
             } // INC B
             0x05 => {
-                self.b = self.b.wrapping_sub(1);
-                self.set_flag_z(self.b == 0);
+                self.b = self.dec8(self.b);
                 4
             } // DEC B
             0x06 => {
@@ -164,6 +295,8 @@ impl CPU {
                 let b7 = self.a >> 7;
                 self.a = (self.a << 1) | b7;
                 self.set_flag_z(false);
+                self.set_flag_n(false);
+                self.set_flag_h(false);
                 self.set_flag_c(b7 != 0);
                 4
             } // RLCA
@@ -175,8 +308,7 @@ impl CPU {
                 20
             } // LD [a16], SP
             0x09 => {
-                let r = self.hl().wrapping_add(self.bc());
-                self.set_hl(r);
+                self.add_hl(self.bc());
                 8
             } // ADD HL, BC
             0x0a => {
@@ -188,13 +320,11 @@ impl CPU {
                 8
             } // DEC BC
             0x0c => {
-                self.c = self.c.wrapping_add(1);
-                self.set_flag_z(self.c == 0);
+                self.c = self.inc8(self.c);
                 4
             } // INC C
             0x0d => {
-                self.c = self.c.wrapping_sub(1);
-                self.set_flag_z(self.c == 0);
+                self.c = self.dec8(self.c);
                 4
             } // DEC C
             0x0e => {
@@ -218,13 +348,11 @@ impl CPU {
                 8
             } // INC DE
             0x14 => {
-                self.d = self.d.wrapping_add(1);
-                self.set_flag_z(self.d == 0);
+                self.d = self.inc8(self.d);
                 4
             } // INC D
             0x15 => {
-                self.d = self.d.wrapping_sub(1);
-                self.set_flag_z(self.d == 0);
+                self.d = self.dec8(self.d);
                 4
             } // DEC D
             0x16 => {
@@ -239,8 +367,7 @@ impl CPU {
                 12
             } // JR e8
             0x19 => {
-                let r = self.hl().wrapping_add(self.de());
-                self.set_hl(r);
+                self.add_hl(self.de());
                 8
             } // ADD HL, DE
             0x1a => {
@@ -252,13 +379,11 @@ impl CPU {
                 8
             } // DEC DE
             0x1c => {
-                self.e = self.e.wrapping_add(1);
-                self.set_flag_z(self.e == 0);
+                self.e = self.inc8(self.e);
                 4
             } // INC E
             0x1d => {
-                self.e = self.e.wrapping_sub(1);
-                self.set_flag_z(self.e == 0);
+                self.e = self.dec8(self.e);
                 4
             } // DEC E
             0x1e => {
@@ -294,13 +419,11 @@ impl CPU {
                 8
             } // INC HL
             0x24 => {
-                self.h = self.h.wrapping_add(1);
-                self.set_flag_z(self.h == 0);
+                self.h = self.inc8(self.h);
                 4
             } // INC H
             0x25 => {
-                self.h = self.h.wrapping_sub(1);
-                self.set_flag_z(self.h == 0);
+                self.h = self.dec8(self.h);
                 4
             } // DEC H
             0x26 => {
@@ -320,8 +443,7 @@ impl CPU {
                 }
             }
             0x29 => {
-                let r = self.hl().wrapping_add(self.hl());
-                self.set_hl(r);
+                self.add_hl(self.hl());
                 8
             } // ADD HL, HL
             0x2a => {
@@ -335,13 +457,11 @@ impl CPU {
                 8
             } // DEC HL
             0x2c => {
-                self.l = self.l.wrapping_add(1);
-                self.set_flag_z(self.l == 0);
+                self.l = self.inc8(self.l);
                 4
             } // INC L
             0x2d => {
-                self.l = self.l.wrapping_sub(1);
-                self.set_flag_z(self.l == 0);
+                self.l = self.dec8(self.l);
                 4
             } // DEC L
             0x2e => {
@@ -383,16 +503,14 @@ impl CPU {
             } // INC SP
             0x34 => {
                 let a = self.hl();
-                let v = mmu.read(a).wrapping_add(1);
+                let v = self.inc8(mmu.read(a));
                 mmu.write(a, v);
-                self.set_flag_z(v == 0);
                 12
             } // INC [HL]
             0x35 => {
                 let a = self.hl();
-                let v = mmu.read(a).wrapping_sub(1);
+                let v = self.dec8(mmu.read(a));
                 mmu.write(a, v);
-                self.set_flag_z(v == 0);
                 12
             } // DEC [HL]
             0x36 => {
@@ -413,8 +531,7 @@ impl CPU {
                 }
             }
             0x39 => {
-                let r = self.hl().wrapping_add(self.sp);
-                self.set_hl(r);
+                self.add_hl(self.sp);
                 8
             } // ADD HL, SP
             0x3a => {
@@ -428,13 +545,11 @@ impl CPU {
                 8
             } // DEC SP
             0x3c => {
-                self.a = self.a.wrapping_add(1);
-                self.set_flag_z(self.a == 0);
+                self.a = self.inc8(self.a);
                 4
             } // INC A
             0x3d => {
-                self.a = self.a.wrapping_sub(1);
-                self.set_flag_z(self.a == 0);
+                self.a = self.dec8(self.a);
                 4
             } // DEC A
             0x3e => {
@@ -641,7 +756,10 @@ impl CPU {
                 mmu.write(self.hl(), self.l);
                 8
             } // LD [HL], L
-            0x76 => 4, // HALT (pendiente)
+            0x76 => {
+                self.halted = true;
+                4
+            } // HALT
             0x77 => {
                 mmu.write(self.hl(), self.a);
                 8
@@ -677,294 +795,215 @@ impl CPU {
             0x7f => 4, // LD A, A
             // ADD A, r8
             0x80 => {
-                let r = self.a.wrapping_add(self.b);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(self.b);
                 4
             }
             0x81 => {
-                let r = self.a.wrapping_add(self.c);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(self.c);
                 4
             }
             0x82 => {
-                let r = self.a.wrapping_add(self.d);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(self.d);
                 4
             }
             0x83 => {
-                let r = self.a.wrapping_add(self.e);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(self.e);
                 4
             }
             0x84 => {
-                let r = self.a.wrapping_add(self.h);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(self.h);
                 4
             }
             0x85 => {
-                let r = self.a.wrapping_add(self.l);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(self.l);
                 4
             }
             0x86 => {
-                let v = mmu.read(self.hl());
-                let r = self.a.wrapping_add(v);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(mmu.read(self.hl()));
                 8
             }
             0x87 => {
-                let r = self.a.wrapping_add(self.a);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a > 127);
-                self.a = r;
+                self.add_a(self.a);
                 4
             }
             // SUB A, r8
             0x90 => {
-                let r = self.a.wrapping_sub(self.b);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < self.b);
-                self.a = r;
+                self.sub_a(self.b);
                 4
             }
             0x91 => {
-                let r = self.a.wrapping_sub(self.c);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < self.c);
-                self.a = r;
+                self.sub_a(self.c);
                 4
             }
             0x92 => {
-                let r = self.a.wrapping_sub(self.d);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < self.d);
-                self.a = r;
+                self.sub_a(self.d);
                 4
             }
             0x93 => {
-                let r = self.a.wrapping_sub(self.e);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < self.e);
-                self.a = r;
+                self.sub_a(self.e);
                 4
             }
             0x94 => {
-                let r = self.a.wrapping_sub(self.h);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < self.h);
-                self.a = r;
+                self.sub_a(self.h);
                 4
             }
             0x95 => {
-                let r = self.a.wrapping_sub(self.l);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < self.l);
-                self.a = r;
+                self.sub_a(self.l);
                 4
             }
             0x96 => {
-                let v = mmu.read(self.hl());
-                let r = self.a.wrapping_sub(v);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < v);
-                self.a = r;
+                self.sub_a(mmu.read(self.hl()));
                 8
             }
             0x97 => {
-                self.a = 0;
-                self.set_flag_z(true);
-                self.set_flag_c(false);
+                self.sub_a(self.a);
                 4
             }
             // SBC A, r8
             0x98 => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_sub(self.b).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(self.b);
                 4
             }
             0x9c => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_sub(self.h).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(self.h);
                 4
             }
             // AND A, r8
             0xa0 => {
-                self.a &= self.b;
-                self.set_flag_z(self.a == 0);
+                self.and_a(self.b);
                 4
             }
             0xa1 => {
-                self.a &= self.c;
-                self.set_flag_z(self.a == 0);
+                self.and_a(self.c);
                 4
             }
             0xa2 => {
-                self.a &= self.d;
-                self.set_flag_z(self.a == 0);
+                self.and_a(self.d);
                 4
             }
             0xa3 => {
-                self.a &= self.e;
-                self.set_flag_z(self.a == 0);
+                self.and_a(self.e);
                 4
             }
             0xa4 => {
-                self.a &= self.h;
-                self.set_flag_z(self.a == 0);
+                self.and_a(self.h);
                 4
             }
             0xa5 => {
-                self.a &= self.l;
-                self.set_flag_z(self.a == 0);
+                self.and_a(self.l);
                 4
             }
             0xa6 => {
-                self.a &= mmu.read(self.hl());
-                self.set_flag_z(self.a == 0);
+                self.and_a(mmu.read(self.hl()));
                 8
             }
             0xa7 => {
-                self.set_flag_z(self.a == 0);
+                self.and_a(self.a);
                 4
             }
             // XOR A, r8
             0xa8 => {
-                self.a ^= self.b;
-                self.set_flag_z(self.a == 0);
+                self.xor_a(self.b);
                 4
             }
             0xa9 => {
-                self.a ^= self.c;
-                self.set_flag_z(self.a == 0);
+                self.xor_a(self.c);
                 4
             }
             0xaa => {
-                self.a ^= self.d;
-                self.set_flag_z(self.a == 0);
+                self.xor_a(self.d);
                 4
             }
             0xab => {
-                self.a ^= self.e;
-                self.set_flag_z(self.a == 0);
+                self.xor_a(self.e);
                 4
             }
             0xac => {
-                self.a ^= self.h;
-                self.set_flag_z(self.a == 0);
+                self.xor_a(self.h);
                 4
             }
             0xad => {
-                self.a ^= self.l;
-                self.set_flag_z(self.a == 0);
+                self.xor_a(self.l);
                 4
             }
             0xae => {
-                self.a ^= mmu.read(self.hl());
-                self.set_flag_z(self.a == 0);
+                self.xor_a(mmu.read(self.hl()));
                 8
             }
             0xaf => {
-                self.a = 0;
-                self.set_flag_z(true);
+                self.xor_a(self.a);
                 4
             } // XOR A, A
             // OR A, r8
             0xb0 => {
-                self.a |= self.b;
-                self.set_flag_z(self.a == 0);
+                self.or_a(self.b);
                 4
             }
             0xb1 => {
-                self.a |= self.c;
-                self.set_flag_z(self.a == 0);
+                self.or_a(self.c);
                 4
             }
             0xb2 => {
-                self.a |= self.d;
-                self.set_flag_z(self.a == 0);
+                self.or_a(self.d);
                 4
             }
             0xb3 => {
-                self.a |= self.e;
-                self.set_flag_z(self.a == 0);
+                self.or_a(self.e);
                 4
             }
             0xb4 => {
-                self.a |= self.h;
-                self.set_flag_z(self.a == 0);
+                self.or_a(self.h);
                 4
             }
             0xb5 => {
-                self.a |= self.l;
-                self.set_flag_z(self.a == 0);
+                self.or_a(self.l);
                 4
             }
             0xb6 => {
-                self.a |= mmu.read(self.hl());
-                self.set_flag_z(self.a == 0);
+                self.or_a(mmu.read(self.hl()));
                 8
             }
             0xb7 => {
-                self.set_flag_z(self.a == 0);
+                self.or_a(self.a);
                 4
             }
             // CP A, r8
             0xb8 => {
-                self.set_flag_z(self.a.wrapping_sub(self.b) == 0);
+                self.cp_a(self.b);
                 4
             }
             0xb9 => {
-                self.set_flag_z(self.a.wrapping_sub(self.c) == 0);
+                self.cp_a(self.c);
                 4
             }
             0xba => {
-                self.set_flag_z(self.a.wrapping_sub(self.d) == 0);
+                self.cp_a(self.d);
                 4
             }
             0xbb => {
-                self.set_flag_z(self.a.wrapping_sub(self.e) == 0);
+                self.cp_a(self.e);
                 4
             }
             0xbc => {
-                self.set_flag_z(self.a.wrapping_sub(self.h) == 0);
+                self.cp_a(self.h);
                 4
             }
             0xbd => {
-                self.set_flag_z(self.a.wrapping_sub(self.l) == 0);
+                self.cp_a(self.l);
                 4
             }
             0xbe => {
-                let v = mmu.read(self.hl());
-                self.set_flag_z(self.a.wrapping_sub(v) == 0);
+                self.cp_a(mmu.read(self.hl()));
                 8
             }
             0xbf => {
-                self.set_flag_z(true);
+                self.cp_a(self.a);
                 4
             } // CP A, A
             // Control flow
             0xc0 => {
-                let v = self.pop(mmu);
                 if !self.get_flag_z() {
-                    self.pc = v;
+                    self.pc = self.pop(mmu);
                     return 20;
                 }
                 8
@@ -1009,9 +1048,8 @@ impl CPU {
                 16
             } // RST $00
             0xc8 => {
-                let v = self.pop(mmu);
                 if self.get_flag_z() {
-                    self.pc = v;
+                    self.pc = self.pop(mmu);
                     return 20;
                 }
                 8
@@ -1059,9 +1097,8 @@ impl CPU {
                 16
             } // RST $08
             0xd0 => {
-                let v = self.pop(mmu);
                 if !self.get_flag_c() {
-                    self.pc = v;
+                    self.pc = self.pop(mmu);
                     return 20;
                 }
                 8
@@ -1099,10 +1136,7 @@ impl CPU {
             0xd6 => {
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                let r = self.a.wrapping_sub(v);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(self.a < v);
-                self.a = r;
+                self.sub_a(v);
                 8
             } // SUB n8
             0xd7 => {
@@ -1111,9 +1145,8 @@ impl CPU {
                 16
             } // RST $10
             0xd8 => {
-                let v = self.pop(mmu);
                 if self.get_flag_c() {
-                    self.pc = v;
+                    self.pc = self.pop(mmu);
                     return 20;
                 }
                 8
@@ -1175,8 +1208,7 @@ impl CPU {
             0xe6 => {
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                self.a &= v;
-                self.set_flag_z(self.a == 0);
+                self.and_a(v);
                 8
             } // AND n8
             0xe7 => {
@@ -1185,9 +1217,9 @@ impl CPU {
                 16
             } // RST $20
             0xe8 => {
-                let v = mmu.read(self.pc) as i8 as i16;
+                let v = mmu.read(self.pc) as i8;
                 self.pc = self.pc.wrapping_add(1);
-                self.sp = (self.sp as i32).wrapping_add(v as i32) as u16;
+                self.add_sp_signed(v);
                 16
             } // ADD SP, e8
             0xe9 => {
@@ -1203,8 +1235,7 @@ impl CPU {
             0xee => {
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                self.a ^= v;
-                self.set_flag_z(self.a == 0);
+                self.xor_a(v);
                 8
             } // XOR n8
             0xef => {
@@ -1220,7 +1251,7 @@ impl CPU {
             } // LDH A, [n8]
             0xf1 => {
                 let v = self.pop(mmu);
-                self.f = (v & 0xFF) as u8;
+                self.f = (v as u8) & 0xF0;
                 self.a = (v >> 8) as u8;
                 12
             } // POP AF
@@ -1243,9 +1274,15 @@ impl CPU {
                 16
             } // RST $30
             0xf8 => {
-                let v = mmu.read(self.pc) as i8 as i16;
+                let v = mmu.read(self.pc) as i8;
                 self.pc = self.pc.wrapping_add(1);
-                let r = (self.sp as i32).wrapping_add(v as i32) as u16;
+                let sp = self.sp;
+                let addend = v as i16 as u16;
+                self.set_flag_z(false);
+                self.set_flag_n(false);
+                self.set_flag_h(((sp & 0x0F) + (addend & 0x0F)) > 0x0F);
+                self.set_flag_c(((sp & 0xFF) + (addend & 0xFF)) > 0xFF);
+                let r = (sp as i32).wrapping_add(v as i32) as u16;
                 self.set_hl(r);
                 12
             } // LD HL, SP+e8
@@ -1266,8 +1303,7 @@ impl CPU {
             0xfe => {
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                let r = self.a.wrapping_sub(v);
-                self.set_flag_z(r == 0);
+                self.cp_a(v);
                 8
             } // CP n8
             0xff => {
@@ -1277,104 +1313,60 @@ impl CPU {
             } // RST $38
             // ADC A, r8
             0x88 => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_add(self.b).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(self.b);
                 4
             }
             0x89 => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_add(self.c).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(self.c);
                 4
             }
             0x8a => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_add(self.d).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(self.d);
                 4
             }
             0x8b => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_add(self.e).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(self.e);
                 4
             }
             0x8c => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_add(self.h).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(self.h);
                 4
             }
             0x8d => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_add(self.l).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(self.l);
                 4
             }
             0x8e => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let v = mmu.read(self.hl());
-                let r = self.a.wrapping_add(v).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(mmu.read(self.hl()));
                 8
             }
             0x8f => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_add(self.a).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(self.a);
                 4
             }
             // SBC A, r8 faltantes
             0x99 => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_sub(self.c).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(self.c);
                 4
             }
             0x9a => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_sub(self.d).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(self.d);
                 4
             }
             0x9b => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_sub(self.e).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(self.e);
                 4
             }
             0x9d => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_sub(self.l).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(self.l);
                 4
             }
             0x9e => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let v = mmu.read(self.hl());
-                let r = self.a.wrapping_sub(v).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(mmu.read(self.hl()));
                 8
             }
             0x9f => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
-                let r = self.a.wrapping_sub(self.a).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(self.a);
                 4
             }
             // Instrucciones sueltas
@@ -1382,6 +1374,8 @@ impl CPU {
                 let b0 = self.a & 1;
                 self.a = (self.a >> 1) | (b0 << 7);
                 self.set_flag_z(false);
+                self.set_flag_n(false);
+                self.set_flag_h(false);
                 self.set_flag_c(b0 != 0);
                 4
             } // RRCA
@@ -1390,6 +1384,8 @@ impl CPU {
                 let b7 = self.a >> 7;
                 self.a = (self.a << 1) | c;
                 self.set_flag_z(false);
+                self.set_flag_n(false);
+                self.set_flag_h(false);
                 self.set_flag_c(b7 != 0);
                 4
             } // RLA
@@ -1398,6 +1394,8 @@ impl CPU {
                 let b0 = self.a & 1;
                 self.a = (self.a >> 1) | c;
                 self.set_flag_z(false);
+                self.set_flag_n(false);
+                self.set_flag_h(false);
                 self.set_flag_c(b0 != 0);
                 4
             } // RRA
@@ -1414,58 +1412,64 @@ impl CPU {
                 self.set_flag_h(false);
                 4
             } // CCF
-            0x27 => 4, // DAA pendiente
+            0x27 => {
+                // Decimal adjust after ADD/ADC/SUB/SBC.
+                let mut a = self.a;
+                let mut adjust = 0u8;
+                let mut carry = self.get_flag_c();
+                let n = (self.f & 0b0100_0000) != 0;
+                let h = (self.f & 0b0010_0000) != 0;
+
+                if !n {
+                    if h || (a & 0x0F) > 0x09 {
+                        adjust |= 0x06;
+                    }
+                    if carry || a > 0x99 {
+                        adjust |= 0x60;
+                        carry = true;
+                    }
+                    a = a.wrapping_add(adjust);
+                } else {
+                    if h {
+                        adjust |= 0x06;
+                    }
+                    if carry {
+                        adjust |= 0x60;
+                    }
+                    a = a.wrapping_sub(adjust);
+                }
+
+                self.a = a;
+                self.set_flag_z(self.a == 0);
+                self.set_flag_h(false);
+                self.set_flag_c(carry);
+                4
+            } // DAA
             0xc6 => {
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                let r = self.a.wrapping_add(v);
-                self.set_flag_z(r == 0);
-                self.set_flag_c(r < self.a);
-                self.a = r;
+                self.add_a(v);
                 8
             } // ADD A, n8
             0xce => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                let r = self.a.wrapping_add(v).wrapping_add(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.adc_a(v);
                 8
             } // ADC A, n8
             0xde => {
-                let c = if self.get_flag_c() { 1u8 } else { 0 };
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                let r = self.a.wrapping_sub(v).wrapping_sub(c);
-                self.set_flag_z(r == 0);
-                self.a = r;
+                self.sbc_a(v);
                 8
             } // SBC A, n8
             0xf6 => {
                 let v = mmu.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
-                self.a |= v;
-                self.set_flag_z(self.a == 0);
+                self.or_a(v);
                 8
             } // OR A, n8
-            _ => {
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open("bruma.log")
-                    .unwrap();
-                writeln!(
-                    file,
-                    "Opcode no implementado: {:#04x} en PC: {:#06x}",
-                    opcode,
-                    self.pc.wrapping_sub(1)
-                )
-                .unwrap();
-                4
-            }
+            _ => 4,
         }
     }
     fn step_cb(&mut self, sub: u8, mmu: &mut MMU) -> u8 {
@@ -1479,6 +1483,8 @@ impl CPU {
                 let b = self.b >> 7;
                 self.b = (self.b << 1) | b;
                 self.set_flag_z(self.b == 0);
+                self.set_flag_n(false);
+                self.set_flag_h(false);
                 self.set_flag_c(b != 0);
                 8
             }
